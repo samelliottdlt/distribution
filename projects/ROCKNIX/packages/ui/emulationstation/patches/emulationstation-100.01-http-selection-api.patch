@@ -1,0 +1,213 @@
+diff --git a/es-app/src/services/HttpApi.cpp b/es-app/src/services/HttpApi.cpp
+index 838b6fa..75171da 100644
+--- a/es-app/src/services/HttpApi.cpp
++++ b/es-app/src/services/HttpApi.cpp
+@@ -10,12 +10,14 @@
+ #include "SystemData.h"
+ #include "FileData.h"
+ #include "views/ViewController.h"
++#include "views/gamelist/IGameListView.h"
+ #include "CollectionSystemManager.h"
+ #include "utils/FileSystemUtil.h"
+ #include "utils/StringUtil.h"
+ #include "utils/md5.h"
+ #include "scrapers/Scraper.h"
+ #include <unordered_map>
++#include <mutex>
+ 
+ void HttpApi::getSystemDataJson(rapidjson::PrettyWriter<rapidjson::StringBuffer>& writer, SystemData* sys, bool localpaths)
+ {
+@@ -342,3 +344,70 @@ std::string HttpApi::getCaps()
+ 
+ 	return s.GetString();
+ }
++
++static std::mutex sSelectionLock;
++static std::string sSelectionKey;
++static std::string sSelectionJson = "{\"seq\":0,\"view\":\"none\"}";
++static int sSelectionSeq = 0;
++
++void HttpApi::updateSelection()
++{
++	if (!ViewController::hasInstance())
++		return;
++
++	auto vc = ViewController::get();
++
++	std::string view = "none";
++	SystemData* system = nullptr;
++	FileData* cursor = nullptr;
++
++	if (vc->getViewMode() == ViewController::SYSTEM_SELECT)
++	{
++		view = "system";
++		system = vc->getSelectedSystem();
++	}
++	else if (vc->getViewMode() == ViewController::GAME_LIST)
++	{
++		view = "gamelist";
++		system = vc->getState().getSystem();
++
++		auto gameList = system != nullptr ? vc->getGameListView(system, false) : nullptr;
++		if (gameList != nullptr)
++			cursor = gameList->getCursor();
++	}
++
++	std::string key = view + "|" + (system != nullptr ? system->getName() : "") + "|" + (cursor != nullptr ? cursor->getPath() : "");
++
++	std::unique_lock<std::mutex> lock(sSelectionLock);
++	if (key == sSelectionKey)
++		return;
++
++	rapidjson::StringBuffer s;
++	rapidjson::PrettyWriter<rapidjson::StringBuffer> writer(s);
++
++	writer.StartObject();
++	writer.Key("seq"); writer.Int(++sSelectionSeq);
++	writer.Key("view"); writer.String(view.c_str());
++	writer.Key("system"); writer.String(system != nullptr ? system->getName().c_str() : "");
++	writer.Key("game");
++	if (cursor != nullptr && cursor->getType() == GAME)
++	{
++		writer.StartObject();
++		writer.Key("id"); writer.String(getFileDataId(cursor).c_str());
++		writer.Key("path"); writer.String(cursor->getPath().c_str());
++		writer.Key("name"); writer.String(cursor->getName().c_str());
++		writer.EndObject();
++	}
++	else
++		writer.Null();
++	writer.EndObject();
++
++	sSelectionKey = key;
++	sSelectionJson = s.GetString();
++}
++
++std::string HttpApi::getSelection()
++{
++	std::unique_lock<std::mutex> lock(sSelectionLock);
++	return sSelectionJson;
++}
+diff --git a/es-app/src/services/HttpApi.h b/es-app/src/services/HttpApi.h
+index cd201b1..2f9bfc9 100644
+--- a/es-app/src/services/HttpApi.h
++++ b/es-app/src/services/HttpApi.h
+@@ -26,6 +26,9 @@ public:
+ 	static bool ImportFromJson(FileData* file, const std::string& json);
+ 
+ 	static bool ImportMedia(FileData* file, const std::string& mediaType, const std::string& contentType, const std::string& mediaBytes);
++
++	static void updateSelection();
++	static std::string getSelection();
+ 	
+ 
+ private:
+diff --git a/es-app/src/services/HttpServerThread.cpp b/es-app/src/services/HttpServerThread.cpp
+index 1599fdf..410250f 100644
+--- a/es-app/src/services/HttpServerThread.cpp
++++ b/es-app/src/services/HttpServerThread.cpp
+@@ -11,6 +11,8 @@
+ #include "SystemData.h"
+ #include "FileData.h"
+ #include "views/ViewController.h"
++#include "views/SystemView.h"
++#include "views/gamelist/IGameListView.h"
+ #include <unordered_map>
+ #include "CollectionSystemManager.h"
+ #include "guis/GuiMenu.h"
+@@ -320,6 +322,75 @@ void HttpServerThread::run()
+ 		}
+ 	});	
+ 
++	mHttpServer->Get("/selection", [](const httplib::Request& req, httplib::Response& res)
++	{
++		if (!isAllowed(req, res))
++			return;
++
++		res.set_content(HttpApi::getSelection(), "application/json");
++	});
++
++	mHttpServer->Post("/selection", [this](const httplib::Request& req, httplib::Response& res)
++	{
++		if (!isAllowed(req, res))
++			return;
++
++		SystemData* system = SystemData::getSystem(req.get_param_value("system"));
++		if (system == nullptr)
++		{
++			res.set_content("404 system not found", "text/html");
++			res.status = 404;
++			return;
++		}
++
++		FileData* game = nullptr;
++		if (req.has_param("id"))
++		{
++			game = HttpApi::findFileData(system, req.get_param_value("id"));
++			if (game == nullptr)
++			{
++				res.set_content("404 game not found", "text/html");
++				res.status = 404;
++				return;
++			}
++		}
++
++		bool open = req.get_param_value("open") == "1";
++
++		Window* w = mWindow;
++		mWindow->postToUiThread([w, system, game, open]()
++		{
++			if (w->getGuiStackSize() > 1 || !ViewController::hasInstance())
++				return;
++
++			w->cancelScreenSaver();
++
++			auto vc = ViewController::get();
++			bool inList = vc->getViewMode() == ViewController::GAME_LIST && vc->getState().getSystem() == system;
++
++			if (game != nullptr)
++			{
++				if (!inList)
++					vc->goToGameList(system);
++
++				auto gameList = vc->getGameListView(system);
++				if (gameList != nullptr)
++					gameList->setCursor(game);
++			}
++			else if (open)
++			{
++				if (!inList)
++					vc->goToGameList(system);
++			}
++			else if (vc->getViewMode() == ViewController::SYSTEM_SELECT)
++				vc->getSystemListView()->goToSystem(system, true);
++			else
++				vc->goToSystemView(system);
++		});
++
++		res.set_content("OK", "text/plain");
++	});
++
+ 	mHttpServer->Get(R"(/systems/(/?.*)/logo)", [](const httplib::Request& req, httplib::Response& res)
+ 	{		
+ 		if (!isAllowed(req, res))
+diff --git a/es-app/src/views/ViewController.cpp b/es-app/src/views/ViewController.cpp
+index 59153c8..269b6ec 100644
+--- a/es-app/src/views/ViewController.cpp
++++ b/es-app/src/views/ViewController.cpp
+@@ -32,6 +32,7 @@
+ #include "VolumeControl.h"
+ #include "guis/GuiNetPlay.h"
+ #include "Gamelist.h"
++#include "services/HttpApi.h"
+ 
+ ViewController* ViewController::sInstance = nullptr;
+ 
+@@ -936,6 +937,7 @@ void ViewController::update(int deltaTime)
+ 		mCurrentView->update(deltaTime);
+ 
+ 	updateSelf(deltaTime);
++	HttpApi::updateSelection();
+ 
+ 	if (mDeferPlayViewTransitionTo != nullptr)
+ 	{

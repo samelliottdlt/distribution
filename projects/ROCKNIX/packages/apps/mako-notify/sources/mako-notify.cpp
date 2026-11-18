@@ -89,8 +89,8 @@ int main(int argc, char* argv[]) {
 
     if (no_es_flag || no_ra_flag) {
         std::string focused_app = get_focused_app();
-        // skip notification if -no-es and EmulationStation focused
-        if (no_es_flag && focused_app == "emulationstation") {
+        // skip notification if -no-es and EmulationStation or homedeck focused
+        if (no_es_flag && (focused_app == "emulationstation" || focused_app == "homedeck")) {
             return 0;
         }
         // skip notification if -no-ra and Retorarch focused

@@ -1,0 +1,26 @@
+#!/bin/bash
+# SPDX-License-Identifier: GPL-2.0-or-later
+# Copyright (C) 2026-present ROCKNIX (https://github.com/ROCKNIX)
+
+. /etc/profile
+
+[ "$(get_setting rocknix.bottomscreen.home)" = "1" ] || exit 0
+
+case "${QUIRK_DEVICE}" in
+  "AYN Thor")
+    OUTPUT="DSI-1"
+    TOP="DSI-2"
+    TOUCH="0:0:bottom_touchscreen"
+    ;;
+  *)
+    exit 0
+    ;;
+esac
+
+ARGS=(--output "${OUTPUT}" --top "${TOP}" --touch "${TOUCH}")
+[ "$(get_setting rocknix.bottomscreen.home.scrape)" = "1" ] && ARGS+=(--scrape)
+VOLUME="$(get_setting rocknix.bottomscreen.home.volume)"
+[ -n "${VOLUME}" ] && ARGS+=(--volume "${VOLUME}")
+
+cd /usr/share/homedeck
+exec python3 main.py "${ARGS[@]}"
